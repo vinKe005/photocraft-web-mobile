@@ -1,0 +1,99 @@
+name: Web (GitHub Pages)
+
+# Fork-only deploy of the mobile browser build to GitHub Pages. It runs packaging/web/package.sh
+# (the same static site the release zip holds) and publishes the unzipped site. HTTPS on Pages
+# enables WebGPU and the clipboard APIs (docs/mobile-browser.md).
+#
+# This is not part of PhotoCraft's shared CI (AGENTS.md > CI workflows): keep it out of any pull
+# request to the upstream repository.
+on:
+  push:
+    branches: [web/mobile-browser]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must match the Dockerfile's TRUNK_VERSION.
+  TRUNK_VERSION: 0.21.14
+
+# One deploy at a time; a newer push replaces a queued one but never cancels a deploy in flight.
+concurrency:
+  group: web-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        with:
+          key: web-pages
+          cache-on-failure: true
+
+      - name: Install Trunk
+        run: |
+          set -euo pipefail
+          asset="trunk-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}"
+          cd "$RUNNER_TEMP"
+          curl --proto '=https' -fsSL --retry 3 -A Photocraft-dev "$url/$asset" -o "$asset"
+          curl --proto '=https' -fsSL --retry 3 -A Photocraft-dev "$url/$asset.sha256" -o "$asset.sha256"
+          printf '%s  %s\n' "$(cat "$asset.sha256")" "$asset" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$asset" -C "$HOME/.local/bin" trunk
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/trunk" --version
+
+      # The interface translations at the commit in craft-i18n.rev, as the Dockerfile embeds them;
+      # without them the build would be English only.
+      - name: Fetch interface translations
+        run: |
+          set -euo pipefail
+          rev="$(tr -d '[:space:]' < craft-i18n.rev)"
+          dir="$RUNNER_TEMP/craft-i18n"
+          mkdir -p "$dir"
+          curl --proto '=https' -fsSL --retry 3 -A Photocraft-dev \
+            "https://codeload.github.com/storytold/craft-i18n/tar.gz/$rev" \
+            | tar -xz --strip-components=1 -C "$dir"
+          test -d "$dir/locales"
+          echo "CRAFT_I18N_DIR=$dir" >> "$GITHUB_ENV"
+          echo "CRAFT_I18N_REQUIRED=1" >> "$GITHUB_ENV"
+
+      - name: Build the static site
+        run: packaging/web/package.sh
+
+      - name: Collect the site
+        run: |
+          set -euo pipefail
+          site=(target/web-package/photocraft-web-*)
+          [[ ${#site[@]} -eq 1 && -f "${site[0]}/index.html" ]] || { echo "error: expected one site folder" >&2; exit 1; }
+          mv "${site[0]}" _site
+          ls -la _site _site/app
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
