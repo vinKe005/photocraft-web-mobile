@@ -44,3 +44,7 @@ details and tests the `.ico` sizes and the WiX icon references.
 
 Replace `photocraft.svg` (and `photocraft-small.svg`), then run `packaging/icons.sh`. It needs
 `resvg`, plus `iconutil` on macOS; the `.ico` is packed by `cargo xtask ico`.
+- `web/`: the browser build's home-screen icons and manifest. `apple-touch-icon.png` (180 px),
+  `icon-192.png` and `icon-512.png` are `photocraft-1024.png` cropped to its tile and laid on the
+  PhotoCraft blue field to the edges, since iOS and Android round and mask home-screen icons
+  themselves and fill transparent corners with black.
