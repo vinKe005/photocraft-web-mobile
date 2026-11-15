@@ -1,2 +1,7 @@
 [alias]
 xtask = "run -p xtask --"
+
+# WebAssembly SIMD (Safari 16.4, Chrome 91, Firefox 89): pixel loops vectorize, which speeds up
+# adjustments and filters in the browser. Every browser the web build supports has it.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

@@ -46,6 +46,13 @@ conteúdo da pasta interna em uma hospedagem estática HTTPS. Não precisa de
 backend. Os caminhos relativos permitem hospedar sob um prefixo. Consulte
 [as instruções de hospedagem](../packaging/web/README.md).
 
+## Desempenho
+
+O build web usa WebAssembly SIMD (`.cargo/config.toml`) e compila filtros, ajustes,
+compositor e gerenciamento de cor otimizando velocidade (`opt-level = 3` no perfil
+`wasm-release`). Isso exige Safari 16.4 / iOS 16.4 ou mais novo, o mesmo mínimo
+que o carregamento em partes já pedia, e deixa o download um pouco maior.
+
 ## Arquivos e limites
 
 Abrir usa o seletor de arquivos do navegador. Salvar e exportar geram downloads;

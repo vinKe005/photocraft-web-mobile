@@ -202,12 +202,16 @@ opt-level = "z"
 opt-level = 3
 [profile.wasm-release.package.photocraft-color]
 opt-level = 3
+#
+# Mobile browser fork: the packaged site ships the wasm as gzipped parts (packaging/web/package.sh),
+# so no single file nears the per-file cap and these three are built for speed. Phones felt the
+# "z" builds as a delay on every adjustment and filter preview.
 [profile.wasm-release.package.craft-cms]
-opt-level = "z"
+opt-level = 3
 [profile.wasm-release.package.photocraft-compose]
-opt-level = "z"
+opt-level = 3
 [profile.wasm-release.package.photocraft-algo]
-opt-level = "z"
+opt-level = 3
 [profile.wasm-release.package.photocraft-paint]
 opt-level = 3
 
