@@ -60,6 +60,15 @@ mkdir -p "$WORK/$NAME/app"
 cp -R "$BOOT/." "$WORK/$NAME/"
 # The boot module imports the app's glue by this name (it can't know Trunk's content hash).
 cp "$GLUE" "$WORK/$NAME/app/photocraft-web.js"
+# The glue imports its JS snippets (`#[wasm_bindgen(inline_js)]`, such as eframe's text agent) from
+# ./snippets/ next to itself. Without them that import fails, the boot module never loads, and the
+# page stays on "Loading PhotoCraft…" with nothing to say why.
+if [[ -d "$APP/snippets" ]]; then
+  cp -R "$APP/snippets" "$WORK/$NAME/app/snippets"
+fi
+for snippet in $(grep -oE "from '\./snippets/[^']+'" "$GLUE" | sed -E "s/^from '\.\/(.*)'$/\1/"); do
+  [[ -f "$WORK/$NAME/app/$snippet" ]] || { echo "error: the app's glue imports $snippet, which is not in the site" >&2; exit 1; }
+done
 # The parts keep the content hash, so they can be cached forever. Their extension is one no
 # server knows: a server that recognised gzip might decode it or label it, and the page inflates
 # the parts itself.
