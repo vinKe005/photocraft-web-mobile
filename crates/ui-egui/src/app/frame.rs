@@ -294,7 +294,7 @@ impl PhotocraftApp {
             self.ui.panels.full_screen_chrome = false;
         }
         // In Full Screen Mode, Tab shows the menu bar, options bar, toolbar and dock (#6760).
-        let mobile = cfg!(target_os = "android") || self.ui.mobile.enabled;
+        let mobile = panels::mobile::active(self);
         let tabbed_in = !chrome && self.ui.panels.full_screen_chrome;
         if mobile && (chrome || tabbed_in) {
             panels::mobile::chrome(self, ui);

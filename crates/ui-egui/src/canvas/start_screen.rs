@@ -2,6 +2,10 @@ use super::tabs::{open_on_double_click, paint_dots};
 use super::{PhotocraftApp, Rect, Sense};
 
 pub(super) fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    if crate::panels::mobile::active(app) {
+        crate::panels::mobile::home(app, ui);
+        return;
+    }
     let area = ui.available_rect_before_wrap();
     paint_dots(ui, area, app.session.prefs().interface.show_canvas_dots);
     open_on_double_click(app, ui, area);

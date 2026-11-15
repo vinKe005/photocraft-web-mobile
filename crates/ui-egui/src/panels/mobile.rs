@@ -266,9 +266,13 @@ fn tile(ui: &mut egui::Ui, size: Vec2, icon: &str, label: &str, selected: bool) 
         let color = if selected { t.accent } else { t.text_dim };
         let icon_rect = Rect::from_center_size(rect.center_top() + vec2(0.0, 20.0), Vec2::splat(24.0));
         icons::paint(ui, icon_rect, icon, 24.0, color);
-        let galley = ui.painter().layout(label.to_owned(), FontId::proportional(11.0), color, rect.width() - 4.0);
-        let pos = egui::pos2(rect.center().x - galley.size().x / 2.0, rect.top() + 36.0);
-        ui.painter().with_clip_rect(rect).galley(pos, galley, color);
+        let mut job = egui::text::LayoutJob::simple(label.to_owned(), FontId::proportional(11.0), color, rect.width() - 4.0);
+        // Long names ("Pincel de recuperação para manchas") take two lines, then an ellipsis.
+        job.wrap.max_rows = 2;
+        job.wrap.overflow_character = Some('…');
+        job.halign = Align::Center;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().with_clip_rect(rect).galley(egui::pos2(rect.center().x, rect.top() + 36.0), galley, color);
     }
     response
 }
@@ -287,12 +291,8 @@ fn top_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, home: bool) {
     egui::Panel::top("mobile_top").resizable(false).frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(6, 2))).show(ui, |ui| {
         ui.allocate_ui_with_layout(vec2(ui.available_width(), TOP_BAR), Layout::left_to_right(Align::Center), |ui| {
             if home {
-                if chip(ui, tl!("New…"), false).clicked() {
-                    run(app, &ctx, "file.new");
-                }
-                if chip(ui, tl!("Open…"), false).clicked() {
-                    run(app, &ctx, "file.open");
-                }
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("PhotoCraft").font(crate::theme::semibold(17.0)).color(t.text));
                 return;
             }
             if icons::button(ui, "x", TOUCH_TARGET, false, tl!("Close")).clicked() {
@@ -312,7 +312,8 @@ fn top_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, home: bool) {
                 if ui.add(export).clicked() {
                     run(app, &ctx, "file.export.exportAs");
                 }
-                ui.menu_button(tl!("More"), |ui| {
+                let more = icons::button(ui, "ellipsis", TOUCH_TARGET, false, tl!("More"));
+                egui::Popup::menu(&more).show(|ui| {
                     for (label, id) in
                         [(tl!("New…"), "file.new"), (tl!("Open…"), "file.open"), (tl!("Save As…"), "file.saveAs"), (tl!("Fit on Screen"), "view.fitOnScreen")]
                     {
@@ -331,11 +332,49 @@ fn top_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, home: bool) {
                 }
             });
         });
-        if !app.ui.status.is_empty() {
-            let color = if app.ui.status_error { t.danger } else { t.text_dim };
-            ui.add(egui::Label::new(egui::RichText::new(&app.ui.status).color(color).small()).truncate());
-        }
     });
+    toast(app, &ctx);
+}
+
+/// The status line as a toast under the top bar that fades after a few seconds (an error stays
+/// a little longer), instead of a line that keeps its height for good.
+fn toast(app: &PhotocraftApp, ctx: &egui::Context) {
+    let status = &app.ui.status;
+    if status.is_empty() {
+        return;
+    }
+    let id = egui::Id::unique("photocraft_mobile_toast");
+    let now = ctx.input(|i| i.time);
+    let (last, since): (String, f64) = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    let since = if *status == last {
+        since
+    } else {
+        ctx.data_mut(|d| d.insert_temp(id, (status.clone(), now)));
+        now
+    };
+    let left = toast_seconds(app.ui.status_error) - (now - since);
+    if left.is_nan() || left <= 0.0 {
+        return;
+    }
+    ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+    let t = Tokens::get(ctx);
+    let width = (ctx.content_rect().width() - 48.0).max(TOUCH_TARGET);
+    egui::Area::new(id.with("area")).order(egui::Order::Foreground).interactable(false).anchor(egui::Align2::CENTER_TOP, vec2(0.0, TOP_BAR + 14.0)).show(
+        ctx,
+        |ui| {
+            let fill = egui::Color32::from_black_alpha(225);
+            egui::Frame::NONE.fill(fill).corner_radius(18).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                ui.set_max_width(width);
+                let color = if app.ui.status_error { t.danger } else { egui::Color32::WHITE };
+                ui.label(egui::RichText::new(status).color(color));
+            });
+        },
+    );
+}
+
+/// How long a toast shows, in seconds.
+fn toast_seconds(error: bool) -> f64 {
+    if error { 5.0 } else { 2.5 }
 }
 
 /// The category tabs along the bottom edge.
@@ -481,8 +520,116 @@ pub(crate) fn chrome(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             .exact_size(height)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(t.chrome).stroke(egui::Stroke::new(1.0, t.separator)))
-            .show(ui, |ui| super::layers::layers(app, ui));
+            .show(ui, |ui| layer_sheet(app, ui));
     }
+}
+
+/// The Layers panel with rows a finger can hit: large thumbnails and taller controls. The
+/// thumbnail size is the sheet's own; the desktop panel keeps its preference.
+fn layer_sheet(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    use crate::state::LayerThumbnailSize;
+    let saved = app.ui.layers_panel_options.thumbnail_size;
+    app.ui.layers_panel_options.thumbnail_size = LayerThumbnailSize::Large;
+    ui.spacing_mut().interact_size.y = 40.0;
+    ui.spacing_mut().item_spacing.y = 6.0;
+    super::layers::layers(app, ui);
+    app.ui.layers_panel_options.thumbnail_size = saved;
+}
+
+/// Whether the phone layout is on: the Android host, or the mobile browser layout.
+pub fn active(app: &PhotocraftApp) -> bool {
+    cfg!(target_os = "android") || app.ui.mobile.enabled
+}
+
+/// Whether a dialog opens as a bottom sheet in the phone layout: the dialogs that preview on the
+/// canvas (adjustments and filters), so the image stays visible above them.
+pub(crate) fn sheet(app: &PhotocraftApp, d: &crate::state::Dialog) -> bool {
+    active(app) && d.kind == crate::state::DialogKind::Command && d.fields.contains_key("__preview")
+}
+
+/// Before and after for a sheet: while held, the canvas shows the image without the dialog's
+/// effect (its Preview off); on release, Preview is back as it was.
+pub(crate) fn compare_button(ui: &mut egui::Ui, fields: &mut serde_json::Map<String, serde_json::Value>, id: egui::Id) {
+    let held_id = id.with("photocraft_mobile_compare");
+    let held: Option<bool> = ui.ctx().data(|d| d.get_temp(held_id));
+    let response = icons::button(ui, "eye", 40.0, held.is_some(), tl!("Show Original"));
+    let preview = fields.get("__preview").and_then(serde_json::Value::as_bool);
+    let (held, set) = compare_step(response.is_pointer_button_down_on(), held, preview);
+    ui.ctx().data_mut(|d| {
+        if let Some(before) = held {
+            d.insert_temp(held_id, before);
+        } else {
+            d.remove::<bool>(held_id);
+        }
+    });
+    if let Some(on) = set {
+        fields.insert("__preview".into(), json!(on));
+    }
+}
+
+/// One frame of the compare button: whether it is `down`, the Preview it found when the hold
+/// began (`held`), and the Preview now. Returns the hold to keep and the Preview to set, if any.
+fn compare_step(down: bool, held: Option<bool>, preview: Option<bool>) -> (Option<bool>, Option<bool>) {
+    match (down, held) {
+        (true, None) => (Some(preview.unwrap_or(true)), Some(false)),
+        (true, Some(before)) => (Some(before), None),
+        (false, Some(before)) => (None, Some(before)),
+        (false, None) => (None, None),
+    }
+}
+
+/// The Home screen in the phone layout: the app's mark and two large actions, Open and New, then
+/// the recent files where there are paths to reopen (not on the web).
+pub(crate) fn home(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    let area = ui.available_rect_before_wrap();
+    let width = (area.width() - 48.0).clamp(0.0, 360.0);
+    let column = Rect::from_min_size(egui::pos2(area.center().x - width / 2.0, area.top() + (area.height() * 0.14).min(120.0)), vec2(width, area.height()));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(column).layout(Layout::top_down(Align::Center)), |ui| {
+        let (mark, _) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::hover());
+        super::brand::paint_mark(ui, mark);
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new("PhotoCraft").font(crate::theme::semibold(26.0)).color(t.text));
+        ui.add_space(32.0);
+        if big_button(ui, width, "folder-open", tl!("Open…"), true).clicked()
+            && let Err(error) = app.open_dialog_file()
+            && error != crate::file_dialog::CANCELLED
+        {
+            app.ui.status = error;
+        }
+        ui.add_space(12.0);
+        if big_button(ui, width, "file-plus", tl!("New file"), false).clicked() {
+            let fields = app.new_document_fields();
+            app.ui.open_dialog(crate::state::DialogKind::NewDocument, fields);
+        }
+        let recent: Vec<String> = if cfg!(target_arch = "wasm32") || !app.session.prefs().interface.show_home_recent_files {
+            Vec::new()
+        } else {
+            app.ui.recent_files.iter().take(6).cloned().collect()
+        };
+        if !recent.is_empty() {
+            ui.add_space(28.0);
+            egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| crate::home_recent_ui::show_home_recent(app, ui, &recent, width));
+        }
+    });
+}
+
+/// A full-width button with an icon, the height of a fingertip; `primary` fills it with the accent.
+fn big_button(ui: &mut egui::Ui, width: f32, icon: &str, label: &str, primary: bool) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 52.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    if ui.is_rect_visible(rect) {
+        let (fill, text) = if primary { (t.accent, t.primary_text) } else { (t.field, t.text) };
+        let fill = if response.is_pointer_button_down_on() { fill.gamma_multiply(0.85) } else { fill };
+        ui.painter().rect_filled(rect, 14.0, fill);
+        let galley = ui.painter().layout_no_wrap(label.to_owned(), crate::theme::semibold(15.0), text);
+        let icon_size = 22.0;
+        let start = rect.center().x - (icon_size + 10.0 + galley.size().x) / 2.0;
+        icons::paint(ui, Rect::from_center_size(egui::pos2(start + icon_size / 2.0, rect.center().y), Vec2::splat(icon_size)), icon, icon_size, text);
+        ui.painter().galley(egui::pos2(start + icon_size + 10.0, rect.center().y - galley.size().y / 2.0), galley, text);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -513,6 +660,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn holding_compare_hides_the_preview_and_releasing_restores_it() {
+        // Press: remember Preview on, turn it off.
+        let (held, set) = compare_step(true, None, Some(true));
+        assert_eq!((held, set), (Some(true), Some(false)));
+        // Still held: nothing changes.
+        assert_eq!(compare_step(true, held, Some(false)), (Some(true), None));
+        // Release: back to what it was.
+        assert_eq!(compare_step(false, held, Some(false)), (None, Some(true)));
+        // A Preview the user had off stays off after the hold.
+        let (held, _) = compare_step(true, None, Some(false));
+        assert_eq!(compare_step(false, held, Some(false)), (None, Some(false)));
+        assert_eq!(compare_step(false, None, Some(true)), (None, None));
+    }
+
+    #[test]
+    fn toasts_fade_and_errors_stay_longer() {
+        assert!(toast_seconds(true) > toast_seconds(false));
+        assert!(toast_seconds(false) > 0.0);
     }
 
     #[test]

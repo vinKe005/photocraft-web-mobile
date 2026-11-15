@@ -636,7 +636,13 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let mut sizing = false;
         let mut processor_alert = None;
         let mut fit_image_alert = None;
+        // In the phone layout, adjustments and filters open as a bottom sheet across the screen,
+        // the image visible above them (`panels::mobile::sheet`).
+        let sheet = crate::panels::mobile::sheet(app, &d);
+        let sheet_width = (ctx.content_rect().width() - 32.0).max(200.0);
+        let mobile = crate::panels::mobile::active(app);
         let area = match start {
+            _ if sheet => egui::Modal::default_area(id).anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -8.0)),
             Some(offset) => egui::Modal::default_area(id).anchor(egui::Align2::LEFT_TOP, offset),
             None => egui::Modal::default_area(id),
         };
@@ -677,7 +683,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             let compact = d.fields.contains_key("__compact");
             // The curve editor's graph is as wide as the dialog lets it be (#5113, #8984).
             let curves = is_curves(&fields);
-            if !compact {
+            if !compact && !sheet && !mobile {
                 ui.set_min_width(if curves { 300.0 } else { 380.0 });
             }
             // A resizable dialog's contents fill its resizable area (#7420), the others the window.
@@ -686,7 +692,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             if let Some(w) = wide {
                 ui.set_min_width(w.min(460.0));
             }
-            if d.kind == DialogKind::NewDocument {
+            if d.kind == DialogKind::NewDocument && !mobile {
                 ui.set_min_width(800.0);
             }
             // The About window: room for the contributor table, the same width on every tab.
@@ -711,6 +717,16 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             if color_picker {
                 ui.set_width(crate::color_picker_ui::content_width(ui));
             }
+            if sheet {
+                ui.set_min_width(sheet_width);
+                ui.set_max_width(sheet_width);
+                // Sliders a thumb can drag, across the sheet.
+                ui.spacing_mut().slider_width = (sheet_width - 150.0).max(120.0);
+                ui.spacing_mut().interact_size.y = 32.0;
+            } else if mobile {
+                // Any other dialog fits the phone's width.
+                ui.set_max_width(sheet_width);
+            }
             let label = egui::Label::new(egui::RichText::new(&title).font(crate::theme::semibold(15.0))).selectable(false);
             let t = if crate::color_picker_ui::owns(&fields) { ui.add_sized(egui::vec2(ui.available_width(), 22.0), label).rect } else { ui.add(label).rect };
             // The whole title band drags (#1921): the full width plus a little of the popup's
@@ -732,6 +748,14 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 processor_alert = image_processor_ui::body(ui, &mut fields);
             } else if fit_image_range::owns(&fields) {
                 fit_image_alert = fit_image_range::body(ui, &mut fields);
+            } else if sheet {
+                // The sheet keeps the upper part of the screen for the image; its body scrolls.
+                let height = (ctx.content_rect().height() * 0.4).max(160.0);
+                outcome = egui::ScrollArea::vertical()
+                    .max_height(height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| dialog_body(app, ui, &d, &mut fields, id, interactive))
+                    .inner;
             } else {
                 outcome = dialog_body(app, ui, &d, &mut fields, id, interactive);
             }
@@ -778,6 +802,9 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     let (done, apply) = button_row(app, ui, &d, &mut fields, id, interactive, web && (web_popup_open || egui::Popup::is_any_open(ui.ctx())));
                     outcome = done.or(outcome);
                     apply_requested |= apply;
+                    if sheet {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| crate::panels::mobile::compare_button(ui, &mut fields, id));
+                    }
                 });
             }
             // The frame around the content (Frame::popup's margin and stroke).
@@ -797,7 +824,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             ctx.data_mut(|m| m.insert_persisted(size_id(place), size));
         }
         // Pin once laid out at its real size (the first frame is an invisible sizing pass).
-        if !sizing && (web || fixed.is_some() || pinned.is_none() || drag != egui::Vec2::ZERO) {
+        if !sizing && !sheet && (web || fixed.is_some() || pinned.is_none() || drag != egui::Vec2::ZERO) {
             let screen = ctx.content_rect();
             // Keep the whole dialog (and so its title bar) on screen.
             let room = (screen.size() - modal.response.rect.size()).max(egui::Vec2::ZERO);
