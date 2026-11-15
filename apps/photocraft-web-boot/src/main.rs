@@ -67,6 +67,21 @@ fn payload(head: &[u8]) -> Option<Payload> {
     }
 }
 
+/// Whether to read the whole app before handing it over, rather than compiling while it downloads.
+/// WebKit (Safari, and every browser on iOS) may stall without an error when compiling a stream
+/// built from the inflated parts, so it gets the whole module at once. `?stream` and `?buffered`
+/// in the page's address override the choice.
+#[cfg(any(target_arch = "wasm32", test))]
+fn buffer_whole(query: &str, user_agent: &str) -> bool {
+    if query.contains("stream") {
+        return false;
+    }
+    if query.contains("buffered") {
+        return true;
+    }
+    user_agent.contains("AppleWebKit") && !user_agent.contains("Chrome/")
+}
+
 /// Gzip inflated a chunk at a time, for browsers that can't do it themselves.
 #[cfg(any(target_arch = "wasm32", test))]
 struct Inflater(flate2::write::GzDecoder<Vec<u8>>);
@@ -105,6 +120,8 @@ mod boot {
     };
 
     use super::{HEAD, Inflater, Payload};
+
+    const MIB: u64 = 1 << 20;
 
     /// Where packaging puts the app, next to this module's own files.
     const PARTS: &str = "./app/parts.txt";
@@ -224,10 +241,20 @@ mod boot {
 
     /// Writes the `held` chunks, then the rest of `reader`'s stream, into `writer`, then closes it.
     async fn pass_on(held: Vec<js_sys::Uint8Array>, reader: &ReadableStreamDefaultReader, writer: &WritableStreamDefaultWriter) -> Result<(), JsValue> {
+        let (mut seen, mut shown) = (0u64, 0u64);
+        let mut count = |chunk: &js_sys::Uint8Array| {
+            seen = seen.saturating_add(u64::from(chunk.length()));
+            if seen / MIB > shown {
+                shown = seen / MIB;
+                progress(&format!("Downloading PhotoCraft\u{2026} {shown} MB"));
+            }
+        };
         for chunk in &held {
+            count(chunk);
             write(chunk, reader, writer).await?;
         }
         while let Some(chunk) = read(reader).await? {
+            count(&chunk);
             write(&chunk, reader, writer).await?;
         }
         JsFuture::from(writer.close()).await?;
@@ -265,6 +292,7 @@ mod boot {
     }
 
     async fn run(fresh: bool) -> Result<(), JsValue> {
+        progress("Downloading PhotoCraft\u{2026}");
         let list = JsFuture::from(fetch(PARTS, fresh).await?.text()?).await?.as_string().unwrap_or_default();
         let parts = super::parts(&list).ok_or_else(|| JsValue::from_str("app/parts.txt is not a parts list"))?;
         let joined = TransformStream::new()?;
@@ -287,8 +315,21 @@ mod boot {
         let init = ResponseInit::new();
         init.set_headers(&headers);
         let response = Response::new_with_opt_readable_stream_and_init(Some(&wasm), &init)?;
+        let window = window()?;
+        let query = window.location().search().unwrap_or_default();
+        let agent = window.navigator().user_agent().unwrap_or_default();
+        // The app's loader instantiates a Response while it streams, and plain bytes otherwise.
+        let module: JsValue = if super::buffer_whole(&query, &agent) {
+            match JsFuture::from(response.array_buffer()?).await {
+                Ok(bytes) => bytes,
+                Err(e) => return Err(cause.take().unwrap_or(e)),
+            }
+        } else {
+            response.into()
+        };
+        progress("Starting PhotoCraft\u{2026}");
         let arg = js_sys::Object::new();
-        js_sys::Reflect::set(&arg, &JsValue::from_str("module_or_path"), &response)?;
+        js_sys::Reflect::set(&arg, &JsValue::from_str("module_or_path"), &module)?;
         match start_app(arg.into()).await {
             Ok(_) => Ok(()),
             Err(e) => Err(cause.take().unwrap_or(e)),
@@ -305,8 +346,9 @@ mod boot {
         let _ = JsFuture::from(wait).await;
     }
 
-    /// Replaces the page's "Loading" text. `reload` adds a link that reloads the page.
-    fn say(text: &str, reload: bool) {
+    /// Replaces the page's "Loading" text. `reload` adds a link that reloads the page; `detail`
+    /// adds a line under it, so the reason shows on phones, whose console nobody can open.
+    fn say(text: &str, reload: bool, detail: Option<&str>) {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
         let Some(loading) = document.get_element_by_id("photocraft_loading") else { return };
         loading.set_text_content(None);
@@ -318,9 +360,57 @@ mod boot {
             let _ = line.append_child(&link);
         }
         let _ = loading.append_child(&line);
+        if let Some(detail) = detail {
+            add_detail(detail);
+        }
+    }
+
+    /// Updates the first line of the page's "Loading" text with how far starting has got. The
+    /// app removes the whole element once it runs, so this never shows over a running app.
+    fn progress(text: &str) {
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        let Some(loading) = document.get_element_by_id("photocraft_loading") else { return };
+        if let Some(line) = loading.first_element_child() {
+            line.set_text_content(Some(text));
+        }
+    }
+
+    /// Adds a line with an error's text under the "Loading" text, while that is still shown.
+    fn add_detail(text: &str) {
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        let Some(loading) = document.get_element_by_id("photocraft_loading") else { return };
+        let Ok(line) = document.create_element("p") else { return };
+        let _ = line.set_attribute("style", "color: #e0e0e0; overflow-wrap: anywhere");
+        // Bounded: a message can carry a whole stack.
+        line.set_text_content(Some(&text.chars().take(600).collect::<String>()));
+        let _ = loading.append_child(&line);
+    }
+
+    /// An error's text: its name and message for an `Error`, the string itself, or its debug form.
+    fn describe(error: &JsValue) -> String {
+        if let Some(e) = error.dyn_ref::<js_sys::Error>() {
+            return format!("{}: {}", String::from(e.name()), String::from(e.message()));
+        }
+        error.as_string().unwrap_or_else(|| format!("{error:?}"))
+    }
+
+    /// Shows errors nothing else catches (the app's loader, the app before it draws) on the page
+    /// while it still says "Loading", so a start that stops without a word shows why.
+    fn show_uncaught_errors() {
+        let Some(window) = web_sys::window() else { return };
+        for (event, field) in [("error", "message"), ("unhandledrejection", "reason")] {
+            let listener = Closure::<dyn FnMut(JsValue)>::new(move |e: JsValue| {
+                let value = js_sys::Reflect::get(&e, &JsValue::from_str(field)).unwrap_or(JsValue::UNDEFINED);
+                add_detail(&format!("{event}: {}", describe(&value)));
+            });
+            let _ = window.add_event_listener_with_callback(event, listener.as_ref().unchecked_ref());
+            // Kept for the life of the page.
+            listener.forget();
+        }
     }
 
     pub fn start() {
+        show_uncaught_errors();
         spawn_local(async {
             let mut attempt = 0;
             loop {
@@ -329,11 +419,12 @@ mod boot {
                     Err(e) => e,
                 };
                 web_sys::console::error_2(&JsValue::from_str("photocraft-web-boot: could not start PhotoCraft:"), &error);
+                let detail = describe(&error);
                 let Some(&wait) = RETRY_AFTER.get(attempt) else {
-                    say("PhotoCraft couldn't be downloaded. Check your connection, then try again: ", true);
+                    say("PhotoCraft couldn't be downloaded or started. Check your connection, then try again: ", true, Some(&detail));
                     return;
                 };
-                say("Loading PhotoCraft\u{2026} (the download failed, trying again)", false);
+                say("Loading PhotoCraft\u{2026} (starting failed, trying again)", false, Some(&detail));
                 sleep(wait).await;
                 attempt += 1;
             }
@@ -353,7 +444,19 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{HEAD, Inflater, MARKER, Payload, parts, payload};
+    use super::{HEAD, Inflater, MARKER, Payload, buffer_whole, parts, payload};
+
+    #[test]
+    fn webkit_gets_the_whole_module_and_the_address_overrides_it() {
+        let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
+        let chrome = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+        let firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
+        assert!(buffer_whole("", iphone));
+        assert!(!buffer_whole("", chrome));
+        assert!(!buffer_whole("", firefox));
+        assert!(!buffer_whole("?stream", iphone));
+        assert!(buffer_whole("?buffered&mobile", chrome));
+    }
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
         let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

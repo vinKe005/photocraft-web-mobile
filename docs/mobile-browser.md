@@ -15,6 +15,11 @@ no navegador, sem instalar APK e sem enviar as fotos a um servidor.
   abre; as margens de segurança reservam espaço para recortes e indicadores.
 - `?mobile` força os controles de toque; `?desktop` força a interface completa.
   Combine com `?webgl&mobile` para forçar também o renderizador WebGL2.
+- No Safari e nos navegadores do iOS (WebKit), o site baixa o WebAssembly inteiro
+  antes de compilá-lo, em vez de compilar durante o download. `?stream` força a
+  compilação durante o download e `?buffered` força o download inteiro.
+- Enquanto carrega, a página mostra a etapa (download, início) e os erros
+  diretamente na tela, já que o console não fica acessível no celular.
 
 ## Compilar e abrir
 
